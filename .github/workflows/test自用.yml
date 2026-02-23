@@ -1,35 +1,42 @@
-name: 加速版构建 6.1.57 欧加真OKI内核 自用
+name: 加速版构建 6.1.57 自用
 
 env:
   TZ: Asia/Shanghai
   ANDROID_VERSION: 'android14'
   KERNEL_VERSION: '6.1'
   KERNEL_NAME: 'android14-11-o-gca13bffobf09'
-  # 常用路径变量 - 使用绝对路径
   KERNEL_DIR: ${{ github.workspace }}/kernel_workspace/common
   DEFCONFIG: ${{ github.workspace }}/kernel_workspace/common/arch/arm64/configs/gki_defconfig
   WORKSPACE: ${{ github.workspace }}
+  CCACHE_KEY: ccache-neov3-6.1.57
 
 on:
   workflow_dispatch:
     inputs:
       ksu_type:
-        description: 'KernelSU分支(SukiSU Ultra/ReSukiSU/KernelSU Next/MKSU/KSU(原版)/无内置KSU,默认ReSukiSU)'
+        description: 'KernelSU分支(ReSukiSU/SukiSU Ultra/KernelSU Next/KSU(原版)/无内置KSU,默认ReSukiSU)'
         required: true
         type: choice
         default: 'resukisu'
         options:
-          - 'sukisu'
           - 'resukisu'
+          - 'sukisu'
           - 'ksunext'
-          - 'mksu'
           - 'ksu'
           - 'none'
+      sukisu_hook:
+        description: 'SukiSU钩子类型 (kprobes/tracepoint，仅当ksu_type为resukisu时有效)'
+        required: true
+        type: choice
+        default: 'kprobes'
+        options:
+          - 'kprobes'
+          - 'tracepoint'
       susfs_enable:
         description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
         required: true
         type: boolean
-        default: 'false'
+        default: 'true'
       kpm_enable:
         description: '是否开启kpm(builtin-使用(re)sukisu内置kpm, kpn-使用独立kpm实现(支持任意KSU/面具环境); 不需要可保持默认关闭)'
         required: true
@@ -77,6 +84,11 @@ on:
         description: '是否开启内核级基带保护(阻止一切对非用户分区的写入，有效防止格机)'
         required: true
         type: boolean
+        default: 'true'
+      ccache_update:
+        description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
+        required: true
+        type: boolean
         default: 'false'
       ccache_debug:
         description: '是否上传 Ccache调试日志(用于调试, 无需要不必开启)'
@@ -94,6 +106,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
+    permissions:
+      actions: write
+      contents: read
     steps:
       - name: 安装环境依赖+初始化源码仓库及llvm-Clang20工具链
         run: |
@@ -108,13 +123,13 @@ jobs:
           sudo apt update &&
           sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev ccache &
 
-          echo "正在克隆源码仓库..."
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_u_14.0.0_oneplus12.zip -o common.zip &&
-          unzip -q common.zip &&
+          echo "正在克隆源码仓库..." &&
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_u_14.0.0_oneplus12.zip -o common.zip && 
+          unzip -q common.zip && 
           mv "android_kernel_common_oneplus_sm8650-oneplus-sm8650_u_14.0.0_oneplus12" common &&
           rm -rf common.zip &
 
-          echo "正在克隆llvm-clang20工具链..." &&
+          echo "正在克隆llvm-Clang20工具链..." &&
           mkdir -p clang20 &&
           aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip -o clang.zip &&
           unzip -q clang.zip -d clang20 &&
@@ -127,15 +142,14 @@ jobs:
 
           wait
 
-          # 检查关键文件是否存在
           if [ ! -d "common" ] || [ ! -d "clang20/bin" ] || [ ! -d "build-tools/bin" ]; then
             echo "❌ 关键文件下载失败，请检查网络或重试"
             exit 1
           fi
 
-          echo "所有源码及llvm-clang20工具链初始化完成！"
+          echo "所有源码及llvm-Clang20工具链初始化完成！"
           echo "正在去除 ABI 保护 & 去除 dirty 后缀..."
-          rm common/android/abi_gki_protected_exports_* || true
+          rm -f common/android/abi_gki_protected_exports_* || true
           for f in common/scripts/setlocalversion; do
             sed -i 's/ -dirty//g' "$f"
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
@@ -154,11 +168,23 @@ jobs:
         id: ccache-restore
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-neov3-6.1.57-${{ runner.os }}-main
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-main
           restore-keys: |
-            ccache-neov3-6.1.57-${{ runner.os }}-
-            ccache-neov3-6.1.57-
+            ${{ env.CCACHE_KEY }}-${{ runner.os }}-
+            ${{ env.CCACHE_KEY }}-
 
+      - name: 清除旧 ccache 缓存
+        if: inputs.ccache_update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "正在清除仓库中的旧 ccache 缓存..."
+          if gh cache delete ${{ env.CCACHE_KEY }}-${{ runner.os }}-main -R ${{ github.repository }}; then
+            echo "成功删除旧的 ccache 缓存！"
+          else
+            echo "旧缓存不存在或已被清理！"
+          fi
+      
       - name: 初始化并配置ccache
         run: |
           export CCACHE_COMPILERCHECK="none"
@@ -238,7 +264,7 @@ jobs:
             echo "正在配置KernelSU Next (dev分支)..."
             curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev/kernel/setup.sh" | bash -s dev
             cd KernelSU-Next
-            # 获取版本号：计算提交总数 + 30000
+            rm -rf .git
             KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
@@ -246,20 +272,7 @@ jobs:
 
             KSU_GIT_TAG=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": *"[^"]*"' | head -n 1 | sed 's/"name": "//;s/"//')
             sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/g" kernel/Kbuild
-
-            # 为KernelSU Next添加WildKSU管理器支持
-            cd ../common/drivers/kernelsu
-            wget -q https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/apk_sign.patch
-            patch -p2 -N -F 3 < apk_sign.patch || true
-
-          elif [[ ${{ github.event.inputs.ksu_type }} == "mksu" ]]; then
-            echo "正在配置 MKSU (5ec1cff/KernelSU)..."
-            curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
-            cd ./KernelSU
-            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/5ec1cff/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-            sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+            # WildKSU 补丁已移除
 
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             echo "正在配置原版 KernelSU (tiann/KernelSU)..."
@@ -280,83 +293,45 @@ jobs:
         if: inputs.susfs_enable
         working-directory: kernel_workspace
         run: |
-          KSU_TYPE="${{ github.event.inputs.ksu_type }}"
-          ANDROID_VER="${{ env.ANDROID_VERSION }}"
-          KERNEL_VER="${{ env.KERNEL_VERSION }}"
-
-          # 克隆 SUSFS 补丁
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b "gki-${ANDROID_VER}-${KERNEL_VER}"
-          wget -q https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
-
-          # 复制通用文件
-          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${ANDROID_VER}-${KERNEL_VER}.patch ./common/
-          cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/ 2>/dev/null || true
-          cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/ 2>/dev/null || true
-
-          cd common
-
-          # 应用主 SUSFS 补丁（带重试和模糊匹配）
-          echo "应用 SUSFS 主补丁..."
-          if patch -p1 -N --fuzz=3 < "50_add_susfs_in_gki-${ANDROID_VER}-${KERNEL_VER}.patch"; then
-            echo "✓ SUSFS 主补丁应用成功"
+          if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
+            echo "正在添加susfs补丁..."
+            git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+            wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
+            cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
+            cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/ 2>/dev/null || true
+            cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/ 2>/dev/null || true
+            cd ./common
+            patch -p1 -N --fuzz=3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || echo "⚠️ SUSFS主补丁失败，继续"
+            patch -p1 -N --fuzz=3 < 69_hide_stuff.patch || echo "⚠️ 69_hide_stuff补丁失败，继续"
+            cd ..
           else
-            echo "⚠️ SUSFS 主补丁应用失败，尝试强制应用..."
-            patch -p1 -N --fuzz=5 -l < "50_add_susfs_in_gki-${ANDROID_VER}-${KERNEL_VER}.patch" || echo "⚠️ SUSFS 主补丁最终失败"
+            echo "已选择无内置KernelSU模式，跳过susfs配置..."
           fi
-
-          # 临时修复 task_mmu.c 中的 show_pad 问题（仅当文件存在时）
-          sed -i 's/goto show_pad;/return 0;/g' ./fs/proc/task_mmu.c 2>/dev/null || true
-
-          # 应用 69_hide_stuff 补丁
-          echo "应用 69_hide_stuff 补丁..."
-          if [ -f "69_hide_stuff.patch" ]; then
-            if patch -p1 -N --fuzz=3 < "69_hide_stuff.patch"; then
-              echo "✓ 69_hide_stuff 补丁应用成功"
-            else
-              echo "⚠️ 69_hide_stuff 补丁应用失败，继续构建"
-            fi
+          if [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
+            echo "正在为原版 KernelSU (tiann/KernelSU)添加补丁..."
+            cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+            cd ./KernelSU
+            patch -p1 -N --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
           fi
-
-          # MKSU / 原版 KSU 的特殊补丁
-          if [ "$KSU_TYPE" = "mksu" ] || [ "$KSU_TYPE" = "ksu" ]; then
-            cd ../KernelSU
-            if [ -f ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ]; then
-              cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch .
-              # 修复补丁中的 Makefile -> Kbuild 路径变更
-              sed -i 's|kernel/Makefile|kernel/Kbuild|g' 10_enable_susfs_for_ksu.patch 2>/dev/null || true
-              if patch -p1 -N --fuzz=3 < 10_enable_susfs_for_ksu.patch; then
-                echo "✓ SUSFS for KSU 补丁应用成功"
-              else
-                echo "⚠️ SUSFS for KSU 补丁应用失败"
-              fi
-            fi
-
-            if [ "$KSU_TYPE" = "mksu" ]; then
-              wget -q https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/mksu_supercalls.patch
-              patch -p1 -N --fuzz=3 < mksu_supercalls.patch || echo "⚠️ mksu_supercalls 补丁应用失败"
-            fi
-            cd ../common
-          fi
-
+          
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         working-directory: kernel_workspace
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
-          git clone --depth=1 https://github.com/linxx9527/oppo_oplus_realme_sm8650.git
+          git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8650.git
           cp ./oppo_oplus_realme_sm8650/zram_patch/001-lz4.patch ./common/
           cp ./oppo_oplus_realme_sm8650/zram_patch/lz4armv8.S ./common/lib
           cp ./oppo_oplus_realme_sm8650/zram_patch/002-zstd.patch ./common/
           cd ./common
           git apply -p1 < 001-lz4.patch || true
           patch -p1 < 002-zstd.patch || true
-          echo "✅ lz4 1.10.0 & zstd 1.5.7 补丁应用完成"
 
       - name: 应用 lz4kd 补丁
         if: inputs.lz4kd_enable
         working-directory: kernel_workspace
         run: |
-          echo "正在添加lz4kd 补丁…"
+          echo "正在添加lz4kd补丁…"
           if [ ! -d "SukiSU_patch" ]; then
             git clone --depth=1 https://github.com/ShirkNeko/SukiSU_patch.git
           fi
@@ -367,7 +342,7 @@ jobs:
           PATCH_FILE="../SukiSU_patch/other/zram/zram_patch/${{ env.KERNEL_VERSION }}/lz4kd.patch"
           if [ -f "$PATCH_FILE" ]; then
             cp "$PATCH_FILE" ./
-            if patch -p1 -N -F 3 < lz4kd.patch; then
+            if patch -p1 -F 3 < lz4kd.patch; then
               echo "✅ lz4kd 补丁应用成功"
             else
               echo "⚠️ lz4kd 补丁应用失败，继续构建"
@@ -381,27 +356,23 @@ jobs:
         working-directory: kernel_workspace
         run: |
           DEFCONFIG="${{ env.DEFCONFIG }}"
-          SUSFS_OPTS=(
-            "CONFIG_KSU_SUSFS=y"
-            "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
-            "CONFIG_KSU_SUSFS_SUS_PATH=y"
-            "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-            "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
-            "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
-            "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-            "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
-            "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
-            "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-            "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
-            "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-            "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-            "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
-            "CONFIG_KSU_SUSFS_SUS_MAP=y"
-          )
-          for opt in "${SUSFS_OPTS[@]}"; do
-            if ! grep -q "^$opt" "$DEFCONFIG"; then
-              echo "$opt" >> "$DEFCONFIG"
-            fi
+          for opt in \
+            CONFIG_KSU_SUSFS \
+            CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
+            CONFIG_KSU_SUSFS_SUS_PATH \
+            CONFIG_KSU_SUSFS_SUS_MOUNT \
+            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            CONFIG_KSU_SUSFS_SUS_KSTAT \
+            CONFIG_KSU_SUSFS_TRY_UMOUNT \
+            CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+            CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            CONFIG_KSU_SUSFS_ENABLE_LOG \
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+            CONFIG_KSU_SUSFS_SUS_MAP; do
+            echo "$opt=y" >> "$DEFCONFIG"
           done
 
       - name: 添加 KSU & 其他配置项
@@ -410,46 +381,49 @@ jobs:
           DEFCONFIG="${{ env.DEFCONFIG }}"
 
           if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
-            if ! grep -q "^CONFIG_KSU=y" "$DEFCONFIG"; then
-              echo "CONFIG_KSU=y" >> "$DEFCONFIG"
-            fi
+            echo "CONFIG_KSU=y" >> "$DEFCONFIG"
           fi
 
           if [[ ${{ github.event.inputs.kpm_enable }} == 'builtin' && ( "${{ github.event.inputs.ksu_type }}" == "sukisu" || "${{ github.event.inputs.ksu_type }}" == "resukisu" ) ]]; then
-            if ! grep -q "^CONFIG_KPM=y" "$DEFCONFIG"; then
-              echo "CONFIG_KPM=y" >> "$DEFCONFIG"
-            fi
+            echo "CONFIG_KPM=y" >> "$DEFCONFIG"
+          fi
+
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
+            echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG"
+          fi
+
+          # 如果选择 resukisu 且钩子类型为 tracepoint，则启用 CONFIG_KSU_TRACEPOINT_HOOK
+          if [[ "${{ github.event.inputs.ksu_type }}" == "resukisu" && "${{ github.event.inputs.sukisu_hook }}" == "tracepoint" ]]; then
+            echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> "$DEFCONFIG"
           fi
 
           # Mountify 支持
-          if ! grep -q "^CONFIG_TMPFS_XATTR=y" "$DEFCONFIG"; then
-            echo "CONFIG_TMPFS_XATTR=y" >> "$DEFCONFIG"
-          fi
-          if ! grep -q "^CONFIG_TMPFS_POSIX_ACL=y" "$DEFCONFIG"; then
-            echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$DEFCONFIG"
-          fi
+          echo "CONFIG_TMPFS_XATTR=y" >> "$DEFCONFIG"
+          echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$DEFCONFIG"
 
-          # LZ4KD 支持
           if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
-            for opt in "CONFIG_ZSMALLOC=y" "CONFIG_CRYPTO_LZ4HC=y" "CONFIG_CRYPTO_LZ4K=y" "CONFIG_CRYPTO_LZ4KD=y" "CONFIG_CRYPTO_842=y"; do
-              if ! grep -q "^$opt" "$DEFCONFIG"; then
-                echo "$opt" >> "$DEFCONFIG"
-              fi
+            for opt in CONFIG_ZSMALLOC=y CONFIG_CRYPTO_LZ4HC=y CONFIG_CRYPTO_LZ4K=y CONFIG_CRYPTO_LZ4KD=y CONFIG_CRYPTO_842=y; do
+              echo "$opt" >> "$DEFCONFIG"
             done
           fi
 
           # O2 优化
-          if ! grep -q "^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" "$DEFCONFIG"; then
-            echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$DEFCONFIG"
+          echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$DEFCONFIG"
+
+          # 跳过 headers 安装
+          echo "CONFIG_HEADERS_INSTALL=n" >> "$DEFCONFIG"
+
+          # 内核后缀（使用标准 LOCALVERSION 方法）
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            SUFFIX="${{ github.event.inputs.kernel_suffix }}"
+          else
+            SUFFIX="${{ env.KERNEL_NAME }}"
           fi
+          echo "CONFIG_LOCALVERSION=\"-${SUFFIX}\"" >> "$DEFCONFIG"
+          echo "CONFIG_LOCALVERSION_AUTO=n" >> "$DEFCONFIG"
 
           # 禁用 defconfig 检查
           sed -i 's/check_defconfig//' ./common/build.config.gki 2>/dev/null || true
-
-          # 跳过 headers 安装
-          if ! grep -q "^CONFIG_HEADERS_INSTALL=n" "$DEFCONFIG"; then
-            echo "CONFIG_HEADERS_INSTALL=n" >> "$DEFCONFIG"
-          fi
 
       - name: 启用网络功能增强优化配置
         if: inputs.better_net
@@ -481,91 +455,60 @@ jobs:
           CONFIG_IP6_NF_NAT=y
           CONFIG_IP6_NF_TARGET_MASQUERADE=y
           EOF
+          # 隐藏 IP6_NF_NAT 警告补丁
           cd common
-          if [ ! -d "../oppo_oplus_realme_sm8650" ]; then
-            echo "正在克隆补丁仓库…"
-            git clone --depth=1 https://github.com/linxx9527/oppo_oplus_realme_sm8650.git ../oppo_oplus_realme_sm8650
-          fi
-          if [ -f "../oppo_oplus_realme_sm8650/other_patch/config.patch" ]; then
-            if patch -p1 -N --fuzz=3 < "../oppo_oplus_realme_sm8650/other_patch/config.patch"; then
-              echo "✅ config.patch 应用成功"
-            else
-              echo "⚠️ config.patch 应用失败，继续构建"
-            fi
-          else
-            echo "⚠️ config.patch 文件不存在，跳过"
-          fi
+          wget -q https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/config.patch
+          patch -p1 -F 3 < config.patch || true
 
       - name: 添加 BBR 等一系列拥塞控制算法
+        if: inputs.bbr_enable != 'false'
         working-directory: kernel_workspace
         run: |
-          if [[ "${{ github.event.inputs.bbr_enable }}" != "false" ]]; then
-            echo "正在添加BBR等拥塞控制算法..."
-            DEFCONFIG="${{ env.DEFCONFIG }}"
-
-            for opt in \
-              "CONFIG_TCP_CONG_ADVANCED=y" \
-              "CONFIG_TCP_CONG_BBR=y" \
-              "CONFIG_TCP_CONG_CUBIC=y" \
-              "CONFIG_TCP_CONG_VEGAS=y" \
-              "CONFIG_TCP_CONG_NV=y" \
-              "CONFIG_TCP_CONG_WESTWOOD=y" \
-              "CONFIG_TCP_CONG_HTCP=y" \
-              "CONFIG_TCP_CONG_BRUTAL=y"; do
-              if ! grep -q "^$opt" "$DEFCONFIG"; then
-                echo "$opt" >> "$DEFCONFIG"
-              fi
-            done
-
-            if [[ "${{ github.event.inputs.bbr_enable }}" == "default" ]]; then
-              if ! grep -q "^CONFIG_DEFAULT_TCP_CONG=bbr" "$DEFCONFIG"; then
-                echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> "$DEFCONFIG"
-              fi
-            else
-              if ! grep -q "^CONFIG_DEFAULT_TCP_CONG=cubic" "$DEFCONFIG"; then
-                echo "CONFIG_DEFAULT_TCP_CONG=cubic" >> "$DEFCONFIG"
-              fi
+          DEFCONFIG="${{ env.DEFCONFIG }}"
+          echo "CONFIG_TCP_CONG_ADVANCED=y" >> "$DEFCONFIG"
+          for opt in \
+            CONFIG_TCP_CONG_BBR=y \
+            CONFIG_TCP_CONG_CUBIC=y \
+            CONFIG_TCP_CONG_VEGAS=y \
+            CONFIG_TCP_CONG_NV=y \
+            CONFIG_TCP_CONG_WESTWOOD=y \
+            CONFIG_TCP_CONG_HTCP=y \
+            CONFIG_TCP_CONG_BRUTAL=y; do
+            if ! grep -q "^$opt" "$DEFCONFIG"; then
+              echo "$opt" >> "$DEFCONFIG"
             fi
+          done
+
+          if [[ "${{ github.event.inputs.bbr_enable }}" == "default" ]]; then
+            echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> "$DEFCONFIG"
+          else
+            echo "CONFIG_DEFAULT_TCP_CONG=cubic" >> "$DEFCONFIG"
           fi
 
       - name: 启用三星SSG IO调度器
         if: inputs.ssg_enable
         working-directory: kernel_workspace
         run: |
-          echo "正在启用三星SSG IO调度器…"
           DEFCONFIG="${{ env.DEFCONFIG }}"
-          if ! grep -q "^CONFIG_MQ_IOSCHED_SSG=y" "$DEFCONFIG"; then
-            echo "CONFIG_MQ_IOSCHED_SSG=y" >> "$DEFCONFIG"
-          fi
-          if ! grep -q "^CONFIG_MQ_IOSCHED_SSG_CGROUP=y" "$DEFCONFIG"; then
-            echo "CONFIG_MQ_IOSCHED_SSG_CGROUP=y" >> "$DEFCONFIG"
-          fi
+          echo "CONFIG_MQ_IOSCHED_SSG=y" >> "$DEFCONFIG"
+          echo "CONFIG_MQ_IOSCHED_SSG_CGROUP=y" >> "$DEFCONFIG"
 
       - name: 启用Re-Kernel支持
         if: inputs.rekernel_enable
         working-directory: kernel_workspace
         run: |
-          echo "正在启用Re-Kernel支持…"
           DEFCONFIG="${{ env.DEFCONFIG }}"
-          if ! grep -q "^CONFIG_REKERNEL=y" "$DEFCONFIG"; then
-            echo "CONFIG_REKERNEL=y" >> "$DEFCONFIG"
-          fi
+          echo "CONFIG_REKERNEL=y" >> "$DEFCONFIG"
 
-      - name: 添加制作名称
+      - name: 启用内核级基带保护
+        if: inputs.baseband_guard
         working-directory: kernel_workspace
         run: |
-          echo "设置内核版本后缀..."
-          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            SUFFIX="${{ github.event.inputs.kernel_suffix }}"
-          else
-            SUFFIX="${{ env.KERNEL_NAME }}"
-          fi
           DEFCONFIG="${{ env.DEFCONFIG }}"
-          # 使用内核官方方法设置 LOCALVERSION
-          echo "CONFIG_LOCALVERSION=\"-${SUFFIX}\"" >> "$DEFCONFIG"
-          echo "CONFIG_LOCALVERSION_AUTO=n" >> "$DEFCONFIG"
-          # 清理 setlocalversion 中的干扰
-          sed -i 's/${scm_version}//' ./common/scripts/setlocalversion 2>/dev/null || true
+          echo "CONFIG_BBG=y" >> "$DEFCONFIG"
+          cd ./common
+          curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
       - name: 预清理磁盘空间（释放资源）
         run: |
@@ -597,34 +540,38 @@ jobs:
             CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out \
             KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
 
-          # ---------- 根据输入动态控制 BBG ----------
+          # ---------- 根据输入动态调整 .config ----------
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
+            echo "🔧 启用 SUSFS 配置..."
+            for opt in \
+              CONFIG_KSU_SUSFS \
+              CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
+              CONFIG_KSU_SUSFS_SUS_PATH \
+              CONFIG_KSU_SUSFS_SUS_MOUNT \
+              CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+              CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+              CONFIG_KSU_SUSFS_SUS_KSTAT \
+              CONFIG_KSU_SUSFS_TRY_UMOUNT \
+              CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+              CONFIG_KSU_SUSFS_SPOOF_UNAME \
+              CONFIG_KSU_SUSFS_ENABLE_LOG \
+              CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+              CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+              CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+              CONFIG_KSU_SUSFS_SUS_MAP; do
+              scripts/config --file out/.config --enable "$opt"
+            done
+          else
+            echo "🔧 禁用 SUSFS 配置..."
+            scripts/config --file out/.config --disable CONFIG_KSU_SUSFS
+          fi
+
           if [[ "${{ github.event.inputs.baseband_guard }}" == "true" ]]; then
             echo "🔧 启用基带保护 (BBG)..."
             scripts/config --file out/.config --enable CONFIG_BBG
-            # 将 baseband_guard 追加到 LSM 链（如果不存在）
-            cd out
-            if grep -q "^CONFIG_LSM=" .config; then
-              if ! grep -q "baseband_guard" .config; then
-                awk '/^CONFIG_LSM=/ { sub(/"$/, ",baseband_guard\""); print; next }1' .config > .config.tmp
-                mv .config.tmp .config
-                echo "✅ 已追加 baseband_guard 到 LSM 列表"
-              else
-                echo "baseband_guard 已存在，无需追加"
-              fi
-            else
-              echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,bpf,baseband_guard"' >> .config
-            fi
-            cd ..
           else
             echo "🔧 禁用基带保护 (BBG)..."
             scripts/config --file out/.config --disable CONFIG_BBG
-            echo "✅ 已禁用 BBG，LSM 链保持不变"
-          fi
-
-          # ---------- 如果 BBG 启用，运行其 setup 脚本 ----------
-          if [[ "${{ github.event.inputs.baseband_guard }}" == "true" ]]; then
-            cd "$WORKDIR/kernel_workspace/common"
-            curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
           fi
 
           # ---------- 编译内核 ----------
@@ -632,11 +579,24 @@ jobs:
             CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out \
             KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
 
+          echo "内核编译完成！"
+          echo "ccache状态："
+          ccache -s
+          echo "编译后空间:"
+          df -h
+
+      - name: 保存新的 ccache 缓存
+        if: steps.ccache-restore.outputs.cache-hit != 'true' || inputs.ccache_update
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-main
+         
       - name: 应用KPM并修补内核
-        if: inputs.kpm_enable == 'builtin' && ( github.event.inputs.ksu_type == 'sukisu' || github.event.inputs.ksu_type == 'resukisu' )
-        working-directory: kernel_workspace/common/out/arch/arm64/boot
+        if: inputs.kpm_enable == 'builtin' && (inputs.ksu_type == 'sukisu' || inputs.ksu_type == 'resukisu')
         run: |
           echo "正在应用KPM并修补内核..."
+          cd kernel_workspace/common/out/arch/arm64/boot
           curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux
           chmod +x patch_linux
           ./patch_linux
@@ -655,24 +615,28 @@ jobs:
             exit 1
           fi
 
-          # 确定 KSU 类型名称
           case "${{ github.event.inputs.ksu_type }}" in
             sukisu) KSU_TYPENAME="SukiSU" ;;
             resukisu) KSU_TYPENAME="ReSukiSU" ;;
             ksunext) KSU_TYPENAME="KSUNext" ;;
-            mksu) KSU_TYPENAME="MKSU" ;;
             ksu) KSU_TYPENAME="KSU" ;;
             *) KSU_TYPENAME="none" ;;
           esac
 
-          # 打包
+          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
+            wget -q https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8650/refs/heads/main/zram.zip
+          fi
+          if [[ "${{ github.event.inputs.kpm_enable }}" == "kpn" ]]; then
+            wget -q https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
+          fi
+
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
             zip -r ../AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A14_${{ github.event.inputs.kernel_suffix }}.zip ./*
           else
             zip -r ../AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A14_${{ env.KERNEL_NAME }}.zip ./*
           fi
 
-      - name: 分类并压缩 ccache 日志
+      - name: 分类并压缩 ccache 日志（调试用）
         if: always() && inputs.ccache_debug
         working-directory: ${{ github.workspace }}/kernel_workspace
         run: |
@@ -680,38 +644,14 @@ jobs:
           grep -E "Result:|cache (hit|miss)" ccache.log > ccache_stats.log || true
           grep "mtime/ctime miss" ccache.log > ccache_miss.log || true
           grep -v -e "mtime/ctime miss" -e "Result:" -e "cache hit" -e "cache miss" -e "error" -e "warning" ccache.log > ccache_other.log || true
-          gzip -9 ccache_errors.log
-          gzip -9 ccache_stats.log
-          gzip -9 ccache_miss.log
-          gzip -9 ccache_other.log
+          gzip -9 ccache_errors.log ccache_stats.log ccache_miss.log ccache_other.log
 
-      - name: 上传错误/警告日志
+      - name: 上传 ccache 调试日志
         if: always() && inputs.ccache_debug
         uses: actions/upload-artifact@v4
         with:
-          name: ccache-errors-log
-          path: ${{ github.workspace }}/kernel_workspace/ccache_errors.log.gz
-
-      - name: 上传缓存统计日志
-        if: always() && inputs.ccache_debug
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-stats-log
-          path: ${{ github.workspace }}/kernel_workspace/ccache_stats.log.gz
-
-      - name: 上传 miss 日志
-        if: always() && inputs.ccache_debug
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-miss-log
-          path: ${{ github.workspace }}/kernel_workspace/ccache_miss.log.gz
-
-      - name: 上传其他日志
-        if: always() && inputs.ccache_debug
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-other-log
-          path: ${{ github.workspace }}/kernel_workspace/ccache_other.log.gz
+          name: ccache-debug-logs
+          path: ${{ github.workspace }}/kernel_workspace/*.log.gz
 
       - name: 上传 ZIP 工件
         uses: actions/upload-artifact@v4
@@ -755,14 +695,12 @@ jobs:
             sukisu) KSU_TYPENAME="SukiSU Ultra" ;;
             resukisu) KSU_TYPENAME="ReSukiSU" ;;
             ksunext) KSU_TYPENAME="KernelSU Next" ;;
-            mksu) KSU_TYPENAME="MKSU" ;;
-            ksu) KSU_TYPENAME="KSU (Official)" ;;
+            ksu) KSU_TYPENAME="KSU" ;;
             *) KSU_TYPENAME="无内置KSU" ;;
           esac
           echo "KSU_TYPENAME=$KSU_TYPENAME" >> $GITHUB_ENV
 
       - name: 创建发布
-        id: create_release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ env.TAG_HEAD }}-${{ env.TIME }}"
@@ -782,9 +720,9 @@ jobs:
             - 三星SSG IO调度器支持：${{ github.event.inputs.ssg_enable }}
             - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
             - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
+            - SukiSU钩子类型（仅resukisu）：${{ github.event.inputs.sukisu_hook }}
             - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
             - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
-            - MKSU管理器下载：[Magic-KernelSU](https://github.com/5ec1cff/KernelSU/actions)
             - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
             ### ⏫️ 更新内容：
             - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
