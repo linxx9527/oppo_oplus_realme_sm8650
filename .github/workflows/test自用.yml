@@ -24,14 +24,6 @@ on:
           - 'ksunext'
           - 'ksu'
           - 'none'
-      sukisu_hook:
-        description: 'SukiSU钩子类型 (kprobes/tracepoint，仅当ksu_type为resukisu时有效)'
-        required: true
-        type: choice
-        default: 'kprobes'
-        options:
-          - 'kprobes'
-          - 'tracepoint'
       susfs_enable:
         description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
         required: true
@@ -392,11 +384,6 @@ jobs:
             echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG"
           fi
 
-          # 如果选择 resukisu 且钩子类型为 tracepoint，则启用 CONFIG_KSU_TRACEPOINT_HOOK
-          if [[ "${{ github.event.inputs.ksu_type }}" == "resukisu" && "${{ github.event.inputs.sukisu_hook }}" == "tracepoint" ]]; then
-            echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> "$DEFCONFIG"
-          fi
-
           # Mountify 支持
           echo "CONFIG_TMPFS_XATTR=y" >> "$DEFCONFIG"
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$DEFCONFIG"
@@ -720,7 +707,6 @@ jobs:
             - 三星SSG IO调度器支持：${{ github.event.inputs.ssg_enable }}
             - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
             - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
-            - SukiSU钩子类型（仅resukisu）：${{ github.event.inputs.sukisu_hook }}
             - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
             - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
             - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
