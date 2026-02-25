@@ -1,4 +1,4 @@
-name: 加速版构建 6.1.57 自用
+name: 加速版构建 6.1.57y
 
 env:
   TZ: Asia/Shanghai
@@ -107,6 +107,8 @@ jobs:
           rm -rf kernel_workspace
           mkdir kernel_workspace
           cd kernel_workspace
+          echo "当前仓库：$GITHUB_REPOSITORY"
+          echo "当前分支：$GITHUB_REF_NAME"
 
           sudo apt-mark hold firefox &&
           sudo apt-mark hold libc-bin &&
@@ -288,7 +290,7 @@ jobs:
           if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
             echo "正在添加susfs补丁..."
             git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
-            wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
             cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
             cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/ 2>/dev/null || true
             cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/ 2>/dev/null || true
@@ -306,18 +308,17 @@ jobs:
             patch -p1 -N --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
           fi
           
-      - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
+      - name: 应用lz4 1.10.0补丁
         if: inputs.lz4_enable
         working-directory: kernel_workspace
         run: |
-          echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
-          git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8650.git
-          cp ./oppo_oplus_realme_sm8650/zram_patch/001-lz4.patch ./common/
-          cp ./oppo_oplus_realme_sm8650/zram_patch/lz4armv8.S ./common/lib
-          cp ./oppo_oplus_realme_sm8650/zram_patch/002-zstd.patch ./common/
+          echo "正在添加lz4 1.10.0补丁…"
+          git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME patch_repo
+          cp ./patch_repo/zram_patch/001-lz4.patch ./common/
+          cp ./patch_repo/zram_patch/lz4armv8.S ./common/lib
           cd ./common
           git apply -p1 < 001-lz4.patch || true
-          patch -p1 < 002-zstd.patch || true
+          echo "✅ lz4 1.10.0 补丁应用完成"
 
       - name: 应用 lz4kd 补丁
         if: inputs.lz4kd_enable
@@ -444,7 +445,7 @@ jobs:
           EOF
           # 隐藏 IP6_NF_NAT 警告补丁
           cd common
-          wget -q https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/config.patch
+          wget -q https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/config.patch
           patch -p1 -F 3 < config.patch || true
 
       - name: 添加 BBR 等一系列拥塞控制算法
@@ -521,6 +522,15 @@ jobs:
           export CCACHE_MAXSIZE="3G"
 
           cd kernel_workspace/common
+
+          # 编译器信息
+          CLANG_DIR="$WORKDIR/kernel_workspace/clang20/bin"
+          CLANG_VERSION="$($CLANG_DIR/clang --version | head -n 1)"
+          LLD_VERSION="$($CLANG_DIR/ld.lld --version | head -n 1)"
+          echo "编译器信息:"
+          echo "Clang版本: $CLANG_VERSION"
+          echo "LLD版本: $LLD_VERSION"
+          pahole_version=$(pahole --version 2>/dev/null | head -n1); [ -z "$pahole_version" ] && echo "pahole版本：未安装" || echo "pahole版本：$pahole_version"
 
           # ---------- 配置内核 ----------
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
@@ -611,7 +621,7 @@ jobs:
           esac
 
           if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
-            wget -q https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8650/refs/heads/main/zram.zip
+            wget -q https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram.zip
           fi
           if [[ "${{ github.event.inputs.kpm_enable }}" == "kpn" ]]; then
             wget -q https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
@@ -623,22 +633,12 @@ jobs:
             zip -r ../AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A14_${{ env.KERNEL_NAME }}.zip ./*
           fi
 
-      - name: 分类并压缩 ccache 日志（调试用）
-        if: always() && inputs.ccache_debug
-        working-directory: ${{ github.workspace }}/kernel_workspace
-        run: |
-          grep -i -E "error|warning" ccache.log > ccache_errors.log || true
-          grep -E "Result:|cache (hit|miss)" ccache.log > ccache_stats.log || true
-          grep "mtime/ctime miss" ccache.log > ccache_miss.log || true
-          grep -v -e "mtime/ctime miss" -e "Result:" -e "cache hit" -e "cache miss" -e "error" -e "warning" ccache.log > ccache_other.log || true
-          gzip -9 ccache_errors.log ccache_stats.log ccache_miss.log ccache_other.log
-
-      - name: 上传 ccache 调试日志
+      - name: 上传 Ccache 调试日志
         if: always() && inputs.ccache_debug
         uses: actions/upload-artifact@v4
         with:
-          name: ccache-debug-logs
-          path: ${{ github.workspace }}/kernel_workspace/*.log.gz
+          name: ccache-debug-log
+          path: ${{ github.workspace }}/kernel_workspace/ccache.log
 
       - name: 上传 ZIP 工件
         uses: actions/upload-artifact@v4
